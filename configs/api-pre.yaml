@@ -1,0 +1,57 @@
+# 404 notice
+app:
+  name: trade-gateway-api
+  env: dev
+
+http:
+  addr: ":38080"
+
+pools:
+  default:
+    size: 1000      # 通用异步任务
+  server:
+    size: 1000     # I/O 密集型
+  worker:
+    size: 500       # CPU 密集型
+
+notifier:
+  lark:
+    enabled: true
+    exception_webhook: "https://open.larksuite.com/open-apis/bot/v2/hook/b8da60d8-a3af-4156-9ecf-e3f0c1023ae3"
+    business_webhook: "https://open.larksuite.com/open-apis/bot/v2/hook/b8da60d8-a3af-4156-9ecf-e3f0c1023ae3"
+    timeout: 3s
+
+clients:
+  http:
+    siristars:
+      timeout: "10s"
+      trace_enabled: false
+      max_idle_per_host: 10
+      idle_conn_timeout: "90s"
+exchange:
+  siristars:
+    spot_host: "https://sapi.staging.siristars.tech"
+    futures_host: "https://fapi.staging.siristars.tech"
+
+tracing:
+  enabled: false           # 初始化全局 OTEL
+  exporter: "otlphttp"
+  # 你用 Tempo 的 4318(HTTP) 或 4317(gRPC) 都行；下面给了两个端点示例，二选一即可
+  endpoint: "127.0.0.1:4318"  # OTLP/HTTP
+  # endpoint: "localhost:4317"       # OTLP/gRPC
+  insecure: true
+  sample_ratio: 1.0
+  resource_attrs:
+    team: "core"
+    project: "bvi"
+
+metrics:
+  prometheus:
+    enabled: true
+    addr: ":9091"
+
+logging:
+  console: false
+  level: debug
+  file_path: ""
+

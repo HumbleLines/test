@@ -1,0 +1,9 @@
+nacos:
+  addr: "127.0.0.1:8848"      # Nacos API 端口
+#  username: "nacos"           # 默认账号，若改过就填改后的
+#  password: "nacos"
+  namespace: "public"         # 命名空间名（或ID），你当前用 public
+  group: "DEFAULT_GROUP"      # 组名
+  data_id: "trade-gateway-api"  # 这个 DataID 指向在 Nacos 中保存的应用配置
+  timeout_ms: 5000            # 连接/请求超时
+  listen_interval_ms: 10000   # (可选) 监听间隔，后面做热更新用

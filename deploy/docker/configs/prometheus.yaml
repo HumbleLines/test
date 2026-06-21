@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Go 应用 /metrics
+  # 如果服务跑在“宿主机 Windows 上”，容器里用 host.docker.internal 访问它
+  - job_name: "trade-gateway"
+    honor_labels: true
+    static_configs:
+      - targets: ["host.docker.internal:8080"]   # 改成应用暴露 /metrics 的端口
+
+  # Promtail 自身指标
+  - job_name: "promtail"
+    static_configs:
+      - targets: ["promtail:9080"]               # promtail 默认 http 端口 9080
+    metrics_path: /metrics
+
+  # Loki 自身指标
+  - job_name: "loki"
+    static_configs:
+      - targets: ["loki:3100"]
+    metrics_path: /metrics
+
+  # Tempo 自身指标
+  - job_name: "tempo"
+    static_configs:
+      - targets: ["tempo:3200"]
+    metrics_path: /metrics

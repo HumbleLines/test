@@ -1,0 +1,216 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  AWS_REGION: "ap-northeast-1"
+  AWS_ACCOUNT_ID: "942446708647"
+  ECR_REPO_NAME: "app-images"
+  IMAGE_NAME: "trade-gateway"
+
+  ECR_BASE_URI: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+
+  # Apps repo（写死也行，保持你原来的）
+  APPS_REPO_BRANCH: "main"
+  APPS_REPO_URL: "http://gitlab.siristars.com/gitlab/devops/infra/helm-siristars-apps.git"
+  SERVICE_KEY: "trade-gateway"
+
+# =========================
+# Build & Push Image
+# =========================
+build-and-push:
+  stage: build
+  image:
+    name: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+    entrypoint: [""]
+  services:
+    - name: docker:28-dind
+      alias: docker
+      command:
+        - "--mtu=1440"
+
+  variables:
+    TARGET: "server"   # 手工运行时可覆盖成 server
+
+  before_script:
+    - set -euo pipefail
+    - echo "Waiting for Docker daemon..."
+    - for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+    - docker info
+
+    - |
+      if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+        echo "❌ Missing AWS creds"
+        exit 1
+      fi
+
+    - aws --version
+    - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+    - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+    - aws configure set region "${AWS_REGION}"
+
+    - |
+      aws ecr get-login-password --region "${AWS_REGION}" \
+        | docker login --username AWS --password-stdin "${ECR_BASE_URI}"
+
+  script:
+    - |
+      set -eux
+      SHORT_SHA="${CI_COMMIT_SHORT_SHA}"
+      IMAGE_TAG="${ECR_BASE_URI}/${ECR_REPO_NAME}:${IMAGE_NAME}-${TARGET}-${SHORT_SHA}"
+      echo "🔨 Building image: ${IMAGE_TAG}"
+
+      docker build --platform linux/amd64 \
+        --build-arg TARGET="${TARGET}" \
+        --build-arg VERSION="${CI_COMMIT_TAG:-${CI_COMMIT_REF_NAME}}" \
+        --build-arg COMMIT_SHA="${CI_COMMIT_SHA}" \
+        --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        -t "${IMAGE_TAG}" .
+
+      echo "📤 Pushing image..."
+      docker push "${IMAGE_TAG}"
+      echo "✅ Image pushed: ${IMAGE_TAG}"
+
+  rules:
+    # 这些分支：自动 build-and-push
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: on_success
+
+    # 其他分支：显示手动按钮（可点）
+    - when: manual
+
+  tags:
+    - docker
+
+
+
+update-siristars-apps-tag:
+  stage: deploy
+  image:
+    name: alpine/git:v2.49.1
+    entrypoint: [""]
+  needs: ["build-and-push"]
+
+  before_script:
+    - set -eu
+    - git config --global user.email "gitlab-pipeline-ci@siristars.com"
+    - git config --global user.name "gitlab-pipeline-ci"
+    - apk add --no-cache yq curl
+
+  script:
+    - |
+      set -eu
+      set -x
+
+      # 仍然支持手工覆盖 TARGET
+      TARGET="${TARGET:-server}"
+      SERVICE_TAG="${IMAGE_NAME}-${TARGET}-${CI_COMMIT_SHORT_SHA}"
+
+      # 按分支选择 values 文件
+      case "${CI_COMMIT_BRANCH}" in
+        dev)     APPS_VALUES_FILE="siristars-app/develop.yaml" ;;
+        qa)      APPS_VALUES_FILE="siristars-app/qa.yaml" ;;
+        staging) APPS_VALUES_FILE="siristars-app/staging.yaml" ;;
+        main|master) APPS_VALUES_FILE="siristars-app/prod.yaml" ;;
+        *)
+          echo "❌ Unsupported branch for deploy: ${CI_COMMIT_BRANCH}"
+          exit 1
+          ;;
+      esac
+
+      echo "SERVICE_KEY=${SERVICE_KEY}"
+      echo "SERVICE_TAG=${SERVICE_TAG}"
+      echo "APPS_VALUES_FILE=${APPS_VALUES_FILE}"
+      echo "APPS_REPO_URL=${APPS_REPO_URL}"
+      echo "APPS_REPO_BRANCH=${APPS_REPO_BRANCH}"
+
+      if [ -z "${HELM_USER_NAME:-}" ] || [ -z "${DEVOPS_INFRA_TOKEN:-}" ]; then
+        echo "❌ Missing HELM_USER_NAME / DEVOPS_INFRA_TOKEN"
+        exit 1
+      fi
+
+      if [ -z "${APPS_REPO_BRANCH:-}" ]; then
+        echo "❌ Missing APPS_REPO_BRANCH"
+        exit 1
+      fi
+
+      git clone "http://${HELM_USER_NAME}:${DEVOPS_INFRA_TOKEN}@gitlab.siristars.com/gitlab/devops/infra/helm-siristars-apps.git"
+      cd helm-siristars-apps
+      git checkout "${APPS_REPO_BRANCH}"
+
+      echo "🧾 BEFORE:"
+      yq e '.applications["'"${SERVICE_KEY}"'"].service_tag' "${APPS_VALUES_FILE}"
+
+      # 🔒 关键保护：如果 applications.trade-gateway 不存在，直接失败（防止再写错层级）
+      if [ "$(yq e '.applications["'"${SERVICE_KEY}"'"] == null' "${APPS_VALUES_FILE}")" = "true" ]; then
+        echo "❌ applications.${SERVICE_KEY} 不存在，拒绝修改（防止写错结构）"
+        exit 1
+      fi
+
+      echo "✍️ Updating applications.${SERVICE_KEY}.service_tag ..."
+      yq e -i '.applications["'"${SERVICE_KEY}"'"].service_tag = "'"${SERVICE_TAG}"'"' "${APPS_VALUES_FILE}"
+
+      echo "🧾 AFTER:"
+      yq e '.applications["'"${SERVICE_KEY}"'"].service_tag' "${APPS_VALUES_FILE}"
+
+      git add "${APPS_VALUES_FILE}"
+
+      if git diff --cached --quiet; then
+        echo "ℹ️ No changes, skip commit."
+        exit 0
+      fi
+
+      git commit -m "${GITLAB_USER_NAME:-ci} bump ${SERVICE_KEY}.service_tag to ${SERVICE_TAG} (${CI_COMMIT_BRANCH})"
+
+      retry=0
+      max_retry=5
+      while true; do
+        if git push origin "${APPS_REPO_BRANCH}"; then
+          echo "✅ Push success"
+          break
+        fi
+
+        retry=$((retry + 1))
+        if [ "${retry}" -ge "${max_retry}" ]; then
+          echo "❌ Push failed after ${max_retry} retries"
+          exit 1
+        fi
+
+        echo "⚠️ Push rejected, syncing with remote and retrying... (${retry}/${max_retry})"
+        git fetch origin "${APPS_REPO_BRANCH}"
+        git rebase "origin/${APPS_REPO_BRANCH}"
+        sleep 2
+      done
+
+      # 可选：通知
+      curl "http://gitlab.siristars.com/gitlab/-/snippets/9/raw/master/lark-send-msg.sh" -o lark-send-msg.sh
+      sh ./lark-send-msg.sh
+
+  rules:
+    # 只有这些分支才自动更新 apps repo
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "qa"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: on_success
+    - when: never
+
+  tags:
+    - docker
